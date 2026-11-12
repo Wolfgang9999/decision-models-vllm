@@ -33,9 +33,6 @@ from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
 # FlashInfer's GDN prefill emits states every N tokens, N a multiple of its
 # 64-token chunk, so checkpoint offsets must be multiples of 64.
 FLASHINFER_GDN_CHECKPOINT_ALIGNMENT = 64
-# Prefill backends that emit those states in FlashInfer's layout. Triton/FLA's
-# chunk is also 64 tokens, and it emits its fp32 running state.
-GDN_CHECKPOINT_PREFILL_BACKENDS = ("flashinfer", "triton")
 
 
 def plan_flashinfer_checkpoints(
@@ -45,11 +42,11 @@ def plan_flashinfer_checkpoints(
 
     Args:
         offsets: Checkpoint offset into each checkpoint row's query, 0 for
-            none. The last ``len(query_lens)`` rows are the prefill kernel's.
+            none. The last `len(query_lens)` rows are the prefill kernel's.
         query_lens: Query length of each sequence the prefill kernel runs.
 
     Returns:
-        ``(every_n_tokens, cu_starts, rows)``: the stride shared by every
+        `(every_n_tokens, cu_starts, rows)`: the stride shared by every
         checkpoint in the batch, cumulative per-sequence checkpoint counts,
         and the index of each checkpoint row's state among the emitted ones.
 
@@ -176,7 +173,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         )
 
         self.gdn_prefill_backend: Literal[
-            "triton", "flashinfer", "cutedsl", "aiter_flydsl", "sycl"
+            "triton", "flashinfer", "cutedsl", "aiter_flydsl", "sycl", "hip"
         ]
         _, self.gdn_prefill_backend = _resolve_gdn_prefill_backend(vllm_config)
         self._check_chunk_metadata_override(type(self), self.gdn_prefill_backend)
@@ -184,7 +181,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         # backend export checkpoints their own way.
         checkpoint_alignment = kv_cache_spec.prefill_checkpoint_alignment
         self.plan_flashinfer_checkpoints = (
-            self.gdn_prefill_backend in GDN_CHECKPOINT_PREFILL_BACKENDS
+            self.gdn_prefill_backend == "flashinfer"
             and checkpoint_alignment is not None
             and checkpoint_alignment % FLASHINFER_GDN_CHECKPOINT_ALIGNMENT == 0
         )
@@ -201,16 +198,14 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             self.compilation_config.cudagraph_mode.has_full_cudagraphs()
         )
         # update_block_table() keeps the source group's batch-level FULL graph
-        # buffers, so only MRV2, which also reuses metadata at capture, may use
-        # it.
+        # buffers, which is safe because the runner reuses metadata at capture.
         self.supports_update_block_table = (
-            vllm_config.use_v2_model_runner
-            and device.type == "cuda"
+            device.type in ("cuda", "xpu")
             # Not isinstance: KDA's RecoverSSM/checkpoint metadata is per group.
             and type(self) is GDNAttentionMetadataBuilder
         )
         if self.supports_update_block_table:
-            # Opts into MRV2's CUDA-only aligned-index precompute.
+            # Opts into MRV2's aligned-index precompute.
             self.mamba_aligned_state_indices: torch.Tensor | None = None
 
         self.decode_cudagraph_max_bs: int = (
@@ -270,9 +265,9 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         """Reject a subclass whose chunk metadata the AITER path would skip.
 
         AITER brings its own varlen prefill metadata and never calls
-        ``_build_chunk_metadata``, so a builder that overrides it would lose
+        `_build_chunk_metadata`, so a builder that overrides it would lose
         that override without a word. No in-tree subclass can get here --
-        ``_resolve_gdn_prefill_backend`` only selects this backend for models
+        `_resolve_gdn_prefill_backend` only selects this backend for models
         with 128-dim GDN key and value heads, which the KDA builders are not --
         but a future one should be told rather than quietly ignored.
         """
@@ -555,6 +550,10 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 prefill_query_start_loc = non_spec_query_start_loc
                 prefill_query_start_loc_cpu = non_spec_query_start_loc_cpu
                 prefill_state_indices = non_spec_state_indices_tensor
+            # A block-table column; the Triton/FLA prefill reads it densely, so
+            # copy it once here rather than in every layer.
+            assert prefill_state_indices is not None
+            prefill_state_indices = prefill_state_indices.contiguous()
 
             if self.gdn_prefill_backend == "aiter_flydsl":
                 # AITER carries its own reusable varlen metadata and has no use
@@ -758,7 +757,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         slot_mapping: torch.Tensor,
     ) -> GDNAttentionMetadata:
         """Re-gather this group's state indices. The other fields are
-        batch-level and stay shared with ``metadata``."""
+        batch-level and stay shared with `metadata`."""
         m = metadata
         checkpoint = (
             m.checkpoint.regather_state_indices(blk_table)

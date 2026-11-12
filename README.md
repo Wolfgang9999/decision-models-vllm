@@ -1,118 +1,124 @@
-# Base Labs decision models on vLLM (A100 bridge)
+# Base Labs decision models on vLLM
 
-A Docker image that serves [elephant-1](https://huggingface.co/baselabs/elephant-1) and
-[joey-1](https://huggingface.co/baselabs/joey-1) with vLLM, using the same `POST /v1/systemone` API as the
-OneJev runtime the model cards install. It batches requests and caches each state's prefix, so on one
-A100 it serves more decisions per second than OneJev once several requests are in flight.
+One command to serve [joey-1](https://huggingface.co/baselabs/joey-1) and
+[elephant-1](https://huggingface.co/baselabs/elephant-1) with vLLM on any recent NVIDIA GPU, with the fastest
+attention path for that GPU picked automatically.
 
-> **Status:** the recipe is the one behind our production A100 image, but this repackaged form has not
-> been rebuilt and smoke-tested yet. Comparisons against current vLLM main and FlashInfer are in progress.
+```bash
+docker run --gpus all --ipc=host -p 8000:8000 ghcr.io/wolfgang9999/decision-models-vllm baselabs/joey-1
+python decide.py http://localhost:8000 joey-1
+```
 
-This is a stopgap. Everything here is on its way into vLLM itself (see [Upstream status](#upstream-status));
-once those PRs merge, `vllm serve baselabs/elephant-1` will do the same and this repo can be retired.
+The server speaks the model cards' `POST /v1/systemone` API (the same as OneJev's server), so only the URL changes.
+
+> **Status:** support for these models is not in a vLLM release yet. This repo pins a vLLM nightly and adds the open
+> pull requests listed below as a Python-only overlay. When they are released, plain `vllm serve` will do the same.
+
+<!-- RESULTS:SUMMARY -->
 
 ## Quick start
 
+### Docker (recommended)
+
 ```bash
-docker build -t decision-vllm .
-
-# elephant-1 (9B)
 docker run --gpus '"device=0"' --ipc=host -p 8000:8000 \
-  -v ~/.cache/decision-models:/models \
-  -e MODEL=baselabs/elephant-1 decision-vllm
-
-# joey-1 (2B); larger prefill steps help a small model
-docker run --gpus '"device=0"' --ipc=host -p 8000:8000 \
-  -v ~/.cache/decision-models:/models \
-  -e MODEL=baselabs/joey-1 -e MAX_NUM_BATCHED_TOKENS=65536 decision-vllm
-
-python decide.py http://localhost:8000 elephant-1
+  -v ~/.cache/huggingface:/root/.cache/huggingface \
+  ghcr.io/wolfgang9999/decision-models-vllm baselabs/elephant-1
 ```
 
-The request and response follow the model cards: a `state`, and `questions` of type `noul`, `choice` or
-`score`. Only the URL changes when moving from OneJev's server. The in-process `qev.DecisionEngine`
-Python API is not available; call the HTTP endpoint instead.
+`decision-serve MODEL [vllm serve options]` is the entrypoint; any `vllm serve` option after the model overrides the
+defaults (for example `--revision <commit>`, `--gpu-memory-utilization 0.6`, `--attention-backend TRITON_ATTN`).
 
-Settings (environment variables):
+### Without Docker
 
-| Variable | Default | Notes |
+Linux x86_64, Python 3.10-3.13, an NVIDIA driver for CUDA 13 (R580 or newer):
+
+```bash
+git clone https://github.com/Wolfgang9999/decision-models-vllm && cd decision-models-vllm
+python -m venv .venv && source .venv/bin/activate
+./install.sh            # pinned vLLM nightly + the overlay (checked file by file)
+./decision-serve baselabs/joey-1
+```
+
+### Request
+
+```python
+import httpx
+r = httpx.post("http://localhost:8000/v1/systemone", json={
+    "model": "joey-1",
+    "state": "I was charged twice this month, please refund one of them.",
+    "questions": {
+        "refund": {"type": "noul", "instructions": "Is the customer asking for a refund?"},
+        "team": {"type": "choice", "instructions": "Which team should handle this?",
+                 "criteria": {"billing": "Charges, refunds", "technical": "App faults", "fraud": "Unauthorised use"}},
+    },
+})
+print(r.json()["answers"])
+```
+
+## What you get on each GPU
+
+| GPU | Prefix cache (one state prefill shared by all its questions) | Attention for the PrefixLM mask | Status |
+|---|---|---|---|
+| A100, A30 (SM 8.0) | Triton GDN checkpoints (#65186) | Triton, prefill on FlashAttention-2 (#65222) | measured |
+| A10, A40, L4, L40S, RTX 30/40 (SM 8.6/8.9) | same | same | expected, not measured |
+| H100, H200 (SM 9.0) | FlashInfer GDN prefill (in vLLM) | FlashInfer native mask (#46558) | expected, not measured |
+| B200, GB200 (SM 10.x) | FlashInfer GDN prefill (in vLLM) | FlashInfer native mask | expected, not measured |
+| RTX PRO 6000, RTX 5090 (SM 12.x) | FlashInfer GDN prefill (in vLLM) | FlashInfer native mask | measured |
+
+<!-- RESULTS:TABLES -->
+
+## How it works
+
+A decision request is one long **state** (a conversation, documents) and several **questions** about it; the model
+returns a calibrated probability for every answer option. Nothing is generated, so the cost is reading the state.
+
+- **One state prefill per request, and per state.** joey-1 and elephant-1 are trained with a block-bidirectional mask:
+  the state is one block and each question another, so the state's representation does not depend on the questions.
+  vLLM PR #63114 adds the model, a PrefixLM scheduler and `/v1/systemone`; each question becomes a sequence that hits
+  the prefix cache for the state. A later request with the same state hits the cache too.
+- **Prefix caching for the hybrid layers.** The models mix full attention with GDN linear-attention layers, whose
+  recurrent state must be saved mid-prefill to be reused. vLLM does that with FlashInfer's kernel on SM 9.0+; #65186
+  makes the Triton kernel do it, which is what SM 8.x needs.
+- **Attention.** #63114 applies the mask with vLLM's Triton kernel on every GPU. On SM 8.x, #65222 sends those prefills
+  to FlashAttention-2 (one non-causal call per block). From SM 9.0 this repo selects FlashInfer, whose prefill applies
+  the mask natively (#46558); measured 5-28% faster than Triton on an RTX PRO 6000 with the same answers.
+
+### Pull requests included
+
+| PR | What | State |
 |---|---|---|
-| `MODEL` | `baselabs/elephant-1` | Hugging Face repo |
-| `REVISION` | `main` | Pin a commit for reproducible results |
-| `MODEL_NAME` | repo name | The `model` field clients send |
-| `PORT` | `8000` | |
-| `MAX_NUM_BATCHED_TOKENS` | `32768` | Tokens per prefill step; 65536 measured +4% on joey-1 |
-| `MAX_NUM_SEQS` | `64` | |
-| `GPU_MEMORY_UTILIZATION` | `0.90` | Lower it if the GPU is shared |
-| `VLLM_PREFIX_LM_FA2` | `1` | `0` turns the FlashAttention-2 prefill off |
+| [vllm#63114](https://github.com/vllm-project/vllm/pull/63114) | model, PrefixLM scheduler, `/v1/systemone` | open |
+| [vllm#65186](https://github.com/vllm-project/vllm/pull/65186) | Triton GDN prefill checkpoints (prefix cache on SM 8.x) | open |
+| [vllm#65222](https://github.com/vllm-project/vllm/pull/65222) | FlashAttention-2 PrefixLM prefill on SM 8.x | open |
+| [vllm#46558](https://github.com/vllm-project/vllm/pull/46558) | FlashInfer native mm-prefix attention | merged |
 
-Extra arguments after the image name go to `vllm serve`.
+On top of those, the overlay carries what it takes to combine them on current vLLM main:
 
-## What it changes
+- #63114 still checks `use_v2_model_runner`, which main removed with Model Runner V1 (#63373); the check is dropped.
+- #63114 keeps prefix caching when the Triton GDN backend exports checkpoints (#65186).
+- #63114 accepts FlashInfer (and FlashAttention with FA4), flags the model as a PrefixLM so they apply its mask, and
+  picks the backend per GPU; vLLM's rule that forces unchunked multimodal input for such models is skipped for this
+  text-only model, whose hybrid prefix cache needs chunked scheduling.
 
-The image starts from vLLM [PR #63114](https://github.com/vllm-project/vllm/pull/63114), which adds these models
-(their block-bidirectional mask, a PrefixLM scheduler and `/v1/systemone`), and adds two A100 fixes on top:
+`overlay/manifest.json` lists every file and the SHA256 of the pinned vLLM file it replaces; `install_overlay.py`
+refuses to apply on any other build.
 
-1. **Prefix caching on A100.** #63114 caches a state only when the linear-attention (GDN) prefill can export
-   its recurrent state mid-prompt, which needs FlashInfer's kernel on Hopper or newer. The overlay makes
-   the Triton kernel write fp32 checkpoints every 64-token chunk, so all questions about one state reuse
-   one prefill. Checkpoints are bit-identical to a prefill cut at that point
-   (`tests/test_fla_gdn_prefill_checkpoints.py`).
-2. **FlashAttention-2 for PrefixLM prefill.** A query in bidirectional range `[start, end]` attends to keys
-   `0..end`, which is plain non-causal attention, so pure prefill batches go to FA2 instead of the Triton
-   attention kernel. Attention fell from 37% to 18% of GPU time.
+## Notes and limits
 
-`install_pr.py` downloads the pinned #63114 source (checksum-verified), installs it over the matching
-nightly wheel, and refuses to apply an overlay file unless the file it replaces has the expected SHA256.
-`/opt/decision-build/provenance.json` in the image records every hash.
-
-## Results
-
-One A100 80GB, BF16, cold prefix cache (a unique nonce per state), 64 long-context requests with 11
-questions each, OneJev and vLLM run at the same time on the same node pool:
-
-| Concurrent requests | OneJev | This image | |
-|---|---:|---:|---:|
-| 1 | 3.18 | 3.27 | +3% |
-| 4 | 5.64 | 7.08 | +26% |
-| 8 | 5.53 | 7.22 | +31% |
-| 16 | 5.53 | 7.24 | +31% |
-
-decisions/s, elephant-1. joey-1 on the same image reaches 26.6 decisions/s from 16 concurrent
-requests (27.7 with 65536-token steps); OneJev was not benchmarked for joey-1.
-
-Agreement with OneJev on elephant-1: 5 to 6 decisions out of 704 flip (under 1%), mean absolute
-probability difference 0.004, largest 0.054. The FA2 path changed 0 of 880 decisions against vLLM's Triton
-kernel. joey-1 probabilities match OneJev to about two decimals.
-
-The gain comes from batching and prefix reuse. A single client sending one request at a time sees about
-the same speed as OneJev.
-
-## Known differences and limits
-
-- **Tested on A100 only.** Builds default to `TORCH_CUDA_ARCH_LIST=8.0`; pass
-  `--build-arg TORCH_CUDA_ARCH_LIST="8.0 8.6 8.9"` for A10, L4 or L40S (untested). On H100, #63114
-  already caches prefixes through FlashInfer; this image has not been measured there, and
-  `VLLM_PREFIX_LM_FA2=0` restores vLLM's own attention path.
-- **Text only.** `--language-model-only` is set; image states are not served.
-- **mammoth-1** should load the same way but has not been tried.
-- **`confidence`** differs from OneJev (near 0 on vLLM, up to about 0.35 on OneJev) although the
-  probabilities agree. Do not port thresholds on that field.
-- **Check models through decisions, not chat.** joey-1's `/v1/chat/completions` output is noise in every
-  runtime, including plain transformers; that is the model, not this image.
+- Text states only (`--language-model-only`); image states need OneJev.
+- `confidence` in answers is computed differently from OneJev; the option probabilities agree.
+- Check these models through decisions, not chat: joey-1's chat output is noise in every runtime.
 - Requests are limited to 16,384 tokens, like the model cards.
+- vLLM's FlashAttention-2 build has no SM 12.x code, which is one reason SM 9.0+ uses FlashInfer here.
 
-## Upstream status
+## Reproducing the numbers
 
-| PR | Covers | |
-|---|---|---|
-| [#63114](https://github.com/vllm-project/vllm/pull/63114) | Model, scheduler, `/v1/systemone` | open |
-| [#65186](https://github.com/vllm-project/vllm/pull/65186) | Triton GDN prefill checkpoints (fix 1, independent implementation) | open |
-| [#65222](https://github.com/vllm-project/vllm/pull/65222) | FA2 PrefixLM prefill on SM 8.x (fix 2) | open |
-
-When all three are in a vLLM release, run that release with the `vllm serve` flags in `serve.sh` and drop
-this image (the flags may change while #63114 is in review).
+`bench/grid_bench.py` drives a server over a grid of state sizes (about 500, 2,000, 4,000 and 13,200 tokens),
+questions per request (1, 11, 44) and concurrency (1 to 64), closed loop, 20 s per window, with a unique nonce per
+request so nothing is reused across requests; then the same state asked in three requests (4, 4 and 3 questions).
+`bench/analyze.py` builds the tables and compares every answer with OneJev's on byte-identical requests.
 
 ## License
 
-Apache-2.0, as vLLM. The files under `overlay/` are modified vLLM sources.
+Apache-2.0, as vLLM. Files under `overlay/` are modified vLLM sources.

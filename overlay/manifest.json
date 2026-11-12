@@ -1,8 +1,21 @@
 {
-  "model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py": "04ecc9fc29a62b863e28016bd09c3185b2f2d6b301c16deed9b7f345ac63648b",
-  "model_executor/models/config.py": "4878b6994d3548712ac1b9410621b64ba77b513e0d1e9ac3c843af793d482d05",
-  "third_party/flash_linear_attention/ops/chunk.py": "c105ead259e86aedc248c53e7c4cef07034d0ff12da608d80265d1dd0990803f",
-  "third_party/flash_linear_attention/ops/chunk_delta_h.py": "240fbe430200c4168799c05243edffc0b8dce7b41651b95233266d632b70071b",
-  "v1/attention/backends/gdn_attn.py": "ea723bc5bd8258caf736295162183f2bc5ff46b5a87b1cd5abb92a1126864fd0",
-  "v1/attention/backends/triton_attn.py": "53b221f99c54b6bc21580d7e3e96a12c5eb1de7397bb4bfafb9d0cb6129cb223"
+  "vllm_commit": "be47189f37f6162991366ff6b91539f6e9d1f432",
+  "base_sha256": {
+    "vllm/entrypoints/openai/decisions/question_types.py": "29fe2690afc8498c807a53699e0a660b31c062cb5f00c1085e68b22351f02417",
+    "vllm/entrypoints/openai/decisions/slot_prompt.py": null,
+    "vllm/entrypoints/openai/decisions/state.py": "0bedf03db4c424b7d3c9a2a19c8bd58aa563dc8281edd8ee3375b7ad36a2dea0",
+    "vllm/entrypoints/openai/decisions/strategies.py": "c31c5e8284714e71e2d232685eb1f868f960eef4f9de4ca088ba15ae732f6721",
+    "vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py": "511093051d2ad41206add6b905d999f0c75e193672e6553056581e2a3753078a",
+    "vllm/model_executor/models/config.py": "63177c857cafa733f8a28ca97a42ca215b2e93259aecf3befed76e9ea34f8832",
+    "vllm/model_executor/models/qwen3_5_slot.py": null,
+    "vllm/model_executor/models/registry.py": "d7ea3a59661936975106aaef5d08dae9ef57416e2dce3a33344c6df92dcda857",
+    "vllm/platforms/cuda.py": "d4e3fbba5f04ac1bc218326c2ab2cf6bdfd24903be49f422096111680bd892a3",
+    "vllm/sampling_params.py": "b72fe9f3dd5ce2e26f1494f59f428474041ee350b2ee5d03bac6efa23a8e4947",
+    "vllm/third_party/flash_linear_attention/ops/chunk.py": "c105ead259e86aedc248c53e7c4cef07034d0ff12da608d80265d1dd0990803f",
+    "vllm/third_party/flash_linear_attention/ops/chunk_delta_h.py": "e900d52b8ab8e4479c21908176fd80b0ae6a4b8a194b213f02a029993d885d30",
+    "vllm/transformers_utils/model_arch_config_convertor.py": "4e24a495bd3b52631701970602647026890c896e25f97a5d4e33f99414d4d1cc",
+    "vllm/v1/attention/backends/gdn_attn.py": "4924f109591ab8d2b57ba08da1e2b862c05af41fc90466f253c6f87f702c2aa9",
+    "vllm/v1/attention/backends/triton_attn.py": "abe3fe86d2364cb81de68c081cc1f31c9637be9d2e7601e0abca3c7e3d63c872",
+    "vllm/v1/core/sched/prefix_lm_scheduler.py": null
+  }
 }

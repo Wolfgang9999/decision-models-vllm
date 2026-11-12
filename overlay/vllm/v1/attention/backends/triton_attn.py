@@ -3,11 +3,9 @@
 """High-Performance Triton-only Attention layer."""
 
 from dataclasses import dataclass, replace
-from typing import ClassVar
+from typing import ClassVar, NamedTuple
 
 import torch
-
-import os
 
 import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
@@ -32,6 +30,7 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
+from vllm.v1.attention.backends.fa_utils import is_fa_version_supported
 from vllm.v1.attention.backends.utils import (
     compute_mm_prefix_range_tensor,
     get_num_attention_heads_from_layers,
@@ -56,12 +55,19 @@ from vllm.v1.kv_cache_interface import (
 logger = init_logger(__name__)
 
 
-# PrefixLM prefill through FlashAttention-2 (SM80+). Set VLLM_PREFIX_LM_FA2=0 for Triton only.
-_PREFIX_LM_FA2 = os.environ.get("VLLM_PREFIX_LM_FA2", "1") != "0"
-
 # constants
 MIN_LAUNCH_GRID_SIZE_2D = 128  # Minimum launch grid size of 2D kernel
 NUM_PAR_SOFTMAX_SEGMENTS = 16  # Number of parallel tiled softmax segments
+
+
+class FA2PrefixLMSegments(NamedTuple):
+    """Non-causal FlashAttention-2 view of a PrefixLM prefill batch."""
+
+    cu_seqlens_q: torch.Tensor
+    seqused_k: torch.Tensor
+    block_table: torch.Tensor
+    max_seqlen_q: int
+    max_seqlen_k: int
 
 
 @dataclass
@@ -96,13 +102,7 @@ class TritonAttentionMetadata:
     mm_prefix_range_tensor: torch.Tensor | None = None
     rswa_prefix_lens: torch.Tensor | None = None
     rswa_window: int | None = None
-    # PrefixLM prefill batches whose every query lies inside a bidirectional range are
-    # plain non-causal attention per (range, request) segment: one FlashAttention-2 call.
-    fa_cu_seqlens_q: torch.Tensor | None = None
-    fa_seqused_k: torch.Tensor | None = None
-    fa_block_table: torch.Tensor | None = None
-    fa_max_seqlen_q: int = 0
-    fa_max_seqlen_k: int = 0
+    fa2_prefix_lm: FA2PrefixLMSegments | None = None
 
 
 class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMetadata]):
@@ -126,8 +126,8 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         self.num_heads_q = get_num_attention_heads_from_layers(
             vllm_config, layer_names
         ) or model_config.get_num_attention_heads(vllm_config.parallel_config)
-        self.num_heads_kv = model_config.get_num_kv_heads(vllm_config.parallel_config)
-        self.headdim = model_config.get_head_size()
+        self.num_heads_kv = kv_cache_spec.num_kv_heads
+        self.headdim = kv_cache_spec.head_size
 
         # Check if CUDA Graphs are enabled for decode
         self.decode_cudagraph_enabled = (
@@ -182,7 +182,7 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         ):
             num_speculative_tokens = speculative_config.num_speculative_tokens or 0
             query_len = 1 + num_speculative_tokens * (
-                2 if speculative_config.parallel_drafting else 1
+                2 if speculative_config.speculator_config.parallel_drafting else 1
             )
             max_query_len_3d = min(query_len, MAX_3D_QUERY_LEN)
         # Scratch is indexed by query token, including verification tokens.
@@ -219,6 +219,16 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             (max_num_tokens_3d, self.num_heads_q, self.num_par_softmax_segments),
             dtype=torch.float32,
             device=device,
+        )
+        # FA2 is the newest FlashAttention on Ampere and Ada; newer GPUs are
+        # left on the Triton kernel until the fast path is measured there.
+        self.fa2_prefix_lm = (
+            current_platform.is_cuda()
+            and current_platform.is_device_capability_family(80)
+            and is_fa_version_supported(2)
+            and getattr(kv_cache_spec, "sliding_window", None) is None
+            and kv_cache_spec.kv_quant_mode == KVQuantMode.NONE
+            and kv_cache_spec.head_size <= 256
         )
         self.rswa_window = model_config.rswa_window
         # R-SWA restages prefix lengths in build(), which the no-op
@@ -293,10 +303,11 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
 
         mm_ranges = common_attn_metadata.mm_req_doc_ranges
         if mm_ranges is not None:
-            self._set_prefix_lm_fa_segments(
-                attn_metadata, common_attn_metadata, mm_ranges, num_reqs
-            )
             attn_metadata.mm_prefix_range = mm_ranges
+            if self.fa2_prefix_lm:
+                attn_metadata.fa2_prefix_lm = self._build_fa2_prefix_lm(
+                    common_attn_metadata, mm_ranges
+                )
             attn_metadata.mm_prefix_range_tensor = compute_mm_prefix_range_tensor(
                 mm_ranges, num_reqs, seq_lens.device
             )
@@ -314,61 +325,52 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
 
         return attn_metadata
 
-    def _set_prefix_lm_fa_segments(
+    def _build_fa2_prefix_lm(
         self,
-        attn_metadata: TritonAttentionMetadata,
-        cam: CommonAttentionMetadata,
+        common_attn_metadata: CommonAttentionMetadata,
         mm_ranges: dict[int, list[tuple[int, int]]],
-        num_reqs: int,
-    ) -> None:
-        """Split every request's query span by bidirectional range.
+    ) -> FA2PrefixLMSegments | None:
+        """Split each request's queries by bidirectional range.
 
-        A query inside range [s, e] attends to keys 0..e, so each (request, range) piece
-        is non-causal attention with e + 1 keys. Left unset (Triton kernel) unless every
-        query of every request lies in such a range, as in a pure PrefixLM prefill batch.
+        A query in range ``[start, end]`` attends to keys ``0..end``, which is
+        plain non-causal attention over ``end + 1`` keys, so every
+        (request, range) piece is one FlashAttention-2 sequence. Returns None
+        unless every query token lies in a range, as in a PrefixLM prefill.
         """
-        if (
-            not _PREFIX_LM_FA2
-            or cam.seq_lens_cpu_upper_bound is None
-            or num_reqs == 0
-        ):
-            return
-        starts = cam.query_start_loc_cpu.numpy()
-        seq_lens = cam.seq_lens_cpu_upper_bound.numpy()
-        cu = [0]
-        k_lens: list[int] = []
+        seq_lens = common_attn_metadata.seq_lens_cpu_upper_bound
+        if seq_lens is None:
+            return None
+        query_start_loc = common_attn_metadata.query_start_loc_cpu.tolist()
+        cu_seqlens_q = [0]
+        seqused_k: list[int] = []
         rows: list[int] = []
-        for i in range(num_reqs):
-            ranges = mm_ranges.get(i)
-            query_len = int(starts[i + 1] - starts[i])
-            if not ranges or query_len <= 0:
-                return
-            seq_len = int(seq_lens[i])
+        for req_idx in range(common_attn_metadata.num_reqs):
+            query_len = query_start_loc[req_idx + 1] - query_start_loc[req_idx]
+            seq_len = int(seq_lens[req_idx])
             context_len = seq_len - query_len
             covered = 0
-            for start, end in sorted(ranges):
-                if start >= end or end + 1 > seq_len:
-                    return
-                lo, hi = max(start, context_len), min(end + 1, seq_len)
-                if hi > lo:
-                    cu.append(cu[-1] + hi - lo)
-                    k_lens.append(end + 1)
-                    rows.append(i)
-                    covered += hi - lo
+            for start, end in sorted(mm_ranges.get(req_idx, ())):
+                first, last = max(start, context_len), min(end + 1, seq_len)
+                if start >= end or first >= last:
+                    continue
+                cu_seqlens_q.append(cu_seqlens_q[-1] + last - first)
+                seqused_k.append(last)
+                rows.append(req_idx)
+                covered += last - first
             if covered != query_len:
-                return
-        device = cam.query_start_loc.device
-        attn_metadata.fa_cu_seqlens_q = async_tensor_h2d(
-            cu, dtype=torch.int32, device=device
+                return None
+        device = common_attn_metadata.query_start_loc.device
+        return FA2PrefixLMSegments(
+            cu_seqlens_q=async_tensor_h2d(
+                cu_seqlens_q, dtype=torch.int32, device=device
+            ),
+            seqused_k=async_tensor_h2d(seqused_k, dtype=torch.int32, device=device),
+            block_table=common_attn_metadata.block_table_tensor.index_select(
+                0, async_tensor_h2d(rows, dtype=torch.int64, device=device)
+            ),
+            max_seqlen_q=max(b - a for a, b in zip(cu_seqlens_q, cu_seqlens_q[1:])),
+            max_seqlen_k=max(seqused_k),
         )
-        attn_metadata.fa_seqused_k = async_tensor_h2d(
-            k_lens, dtype=torch.int32, device=device
-        )
-        attn_metadata.fa_block_table = cam.block_table_tensor.index_select(
-            0, async_tensor_h2d(rows, dtype=torch.int64, device=device)
-        )
-        attn_metadata.fa_max_seqlen_q = max(b - a for a, b in zip(cu, cu[1:]))
-        attn_metadata.fa_max_seqlen_k = max(k_lens)
 
     def update_draft_decode_metadata(self, _metadata: TritonAttentionMetadata) -> None:
         pass
@@ -486,15 +488,15 @@ class TritonAttentionImpl(AttentionImpl):
         """Extract per-head scale views from the padded content dimension.
 
         The KV cache is packed as logical shape
-        ``(num_blocks, nkv, block_size, 2 * (hs + pad))`` where
-        ``pad = sizeof(float32) / sizeof(cache_dtype)``.  The content dim holds
-        ``[K(hs) | K_scale(pad) | V(hs) | V_scale(pad)]`` per (head, slot); the
-        last ``pad`` elements of each half hold one float32 scale.  We create
-        strided float32 views over those bytes.  ``kv_cache`` must be the
+        `(num_blocks, nkv, block_size, 2 * (hs + pad))` where
+        `pad = sizeof(float32) / sizeof(cache_dtype)`.  The content dim holds
+        `[K(hs) | K_scale(pad) | V(hs) | V_scale(pad)]` per (head, slot); the
+        last `pad` elements of each half hold one float32 scale.  We create
+        strided float32 views over those bytes.  `kv_cache` must be the
         packed logical tensor (call before any transpose), but may have HND or
         NHD physical strides.
 
-        Scale shape: ``(num_blocks, block_size, num_kv_heads)``
+        Scale shape: `(num_blocks, block_size, num_kv_heads)`
         """
         if self._k_scale_cache is not None:
             return
@@ -527,6 +529,9 @@ class TritonAttentionImpl(AttentionImpl):
         k_scale_off_f32 = base_off_f32 + to_f32_units(hs)
         v_scale_off_f32 = base_off_f32 + to_f32_units(padded_hs + hs)
 
+        # Not initialized: each scale is written with its token before any
+        # unmasked read, and an extensible KV cache backs only a prefix of
+        # num_blocks during warmup.
         # K scales (first content half)
         self._k_scale_cache = torch.as_strided(
             base_f32,
@@ -534,7 +539,6 @@ class TritonAttentionImpl(AttentionImpl):
             stride=(block_f32, slot_f32, head_f32),
             storage_offset=k_scale_off_f32,
         )
-        self._k_scale_cache.fill_(1.0)
 
         # V scales (second content half)
         self._v_scale_cache = torch.as_strided(
@@ -543,7 +547,8 @@ class TritonAttentionImpl(AttentionImpl):
             stride=(block_f32, slot_f32, head_f32),
             storage_offset=v_scale_off_f32,
         )
-        self._v_scale_cache.fill_(1.0)
+        if self._set_kv_ptr_range:
+            set_triton_ptr_range(kv_cache, self._k_scale_cache, self._v_scale_cache)
 
     def fused_output_quant_supported(self, quant_key: QuantKey):
         return quant_key == kFp8StaticTensorSym
@@ -630,6 +635,16 @@ class TritonAttentionImpl(AttentionImpl):
 
         self._kv_quant_mode = get_kv_quant_mode(kv_cache_dtype)
         self._is_per_token_head_quant = self._kv_quant_mode.is_per_token_head
+        if self._kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
+            from vllm.v1.attention.ops.int4_per_token_head import init_rht_signs
+
+            init_rht_signs(
+                head_size,
+                torch.device(
+                    current_platform.device_type,
+                    torch.accelerator.current_device_index(),
+                ),
+            )
 
         # Enable tensor descriptors for Q/K/V load/store on platforms that
         # benefit from HW 2D block reads (Intel XPU).  The dead branch
@@ -646,17 +661,11 @@ class TritonAttentionImpl(AttentionImpl):
         else:
             self.use_td = td_override
         self._set_kv_ptr_range = current_platform.is_rocm()
-        # FlashAttention-2 serves PrefixLM prefill only for the plain unquantized case.
-        self._fa2_prefix_lm = bool(
-            _PREFIX_LM_FA2
-            and current_platform.is_cuda()
-            and current_platform.has_device_capability(80)
-            and self.alibi_slopes is None
-            and self.sliding_window == (-1, -1)
-            and not self.logits_soft_cap
-            and self.sinks is None
-            and self._kv_quant_mode == KVQuantMode.NONE
-            and head_size <= 256
+        self.fa2_prefix_lm = (
+            alibi_slopes is None
+            and not logits_soft_cap
+            and sinks is None
+            and attn_type == AttentionType.DECODER
         )
 
     def forward(
@@ -763,9 +772,10 @@ class TritonAttentionImpl(AttentionImpl):
             k_scale_cache = None
             v_scale_cache = None
 
+        fa2 = attn_metadata.fa2_prefix_lm
         if (
-            attn_metadata.fa_cu_seqlens_q is not None
-            and self._fa2_prefix_lm
+            fa2 is not None
+            and self.fa2_prefix_lm
             and output_scale is None
             and query.dtype in (torch.bfloat16, torch.float16)
         ):
@@ -776,13 +786,13 @@ class TritonAttentionImpl(AttentionImpl):
                 k=key_cache,
                 v=value_cache,
                 out=output[:num_actual_tokens],
-                cu_seqlens_q=attn_metadata.fa_cu_seqlens_q,
-                max_seqlen_q=attn_metadata.fa_max_seqlen_q,
-                seqused_k=attn_metadata.fa_seqused_k,
-                max_seqlen_k=attn_metadata.fa_max_seqlen_k,
+                cu_seqlens_q=fa2.cu_seqlens_q,
+                max_seqlen_q=fa2.max_seqlen_q,
+                seqused_k=fa2.seqused_k,
+                max_seqlen_k=fa2.max_seqlen_k,
                 softmax_scale=self.scale,
                 causal=False,
-                block_table=attn_metadata.fa_block_table,
+                block_table=fa2.block_table,
                 fa_version=2,
             )
             return output
@@ -852,6 +862,8 @@ class TritonAttentionImpl(AttentionImpl):
         if self._kv_quant_mode == KVQuantMode.FP8_PER_TOKEN_HEAD:
             key_cache = key_cache.view(self.fp8_dtype)
             value_cache = value_cache.view(self.fp8_dtype)
+        if self._set_kv_ptr_range:
+            set_triton_ptr_range(kv_cache, key_cache, value_cache)
         return key_cache, value_cache
 
     def _forward_encoder_attention(
@@ -882,7 +894,8 @@ class TritonAttentionImpl(AttentionImpl):
 
         # Use encoder-specific metadata for sequence information
         query_start_loc = attn_metadata.query_start_loc
-        seq_lens = attn_metadata.seq_lens
+        # No KV cache: K/V length is the query length, not seq_lens.
+        seq_lens = query_start_loc[1:] - query_start_loc[:-1]
         max_query_len = attn_metadata.max_query_len
 
         # Call flash attention directly on Q, K, V tensors
