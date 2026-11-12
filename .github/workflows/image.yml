@@ -1,7 +1,7 @@
 name: image
 on:
   push:
-    branches: [main, release-v2]
+    branches: [main, release-v2, hopper-fa3]
     paths: [Dockerfile, overlay/**, install_overlay.py, .github/workflows/image.yml]
   workflow_dispatch:
 permissions:
@@ -26,7 +26,9 @@ jobs:
         run: |
           IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}
           PIN=$(python3 -c "import json; print(json.load(open('overlay/manifest.json'))['vllm_commit'])")
-          docker build -t $IMAGE:latest -t $IMAGE:vllm-${PIN:0:9}-${GITHUB_SHA::7} .
-          docker run --rm --entrypoint python3 $IMAGE:latest -c "import vllm.model_executor.models.qwen3_5_slot, vllm.v1.core.sched.prefix_lm_scheduler; print('overlay import ok')"
-          docker inspect --format 'entrypoint={{json .Config.Entrypoint}}' $IMAGE:latest
+          # :latest only from main; other branches get :<branch> (e.g. :hopper-fa3).
+          if [ "$GITHUB_REF_NAME" = main ]; then MOVING=latest; else MOVING=${GITHUB_REF_NAME//\//-}; fi
+          docker build -t $IMAGE:$MOVING -t $IMAGE:vllm-${PIN:0:9}-${GITHUB_SHA::7} .
+          docker run --rm --entrypoint python3 $IMAGE:$MOVING -c "import vllm.model_executor.models.qwen3_5_slot, vllm.v1.core.sched.prefix_lm_scheduler; print('overlay import ok')"
+          docker inspect --format 'entrypoint={{json .Config.Entrypoint}}' $IMAGE:$MOVING
           docker push --all-tags $IMAGE

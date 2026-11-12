@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """High-Performance Triton-only Attention layer."""
 
+import os
 from dataclasses import dataclass, replace
 from typing import ClassVar, NamedTuple
 
@@ -61,13 +62,14 @@ NUM_PAR_SOFTMAX_SEGMENTS = 16  # Number of parallel tiled softmax segments
 
 
 class FA2PrefixLMSegments(NamedTuple):
-    """Non-causal FlashAttention-2 view of a PrefixLM prefill batch."""
+    """Non-causal FlashAttention (FA2 or FA3) view of a PrefixLM prefill batch."""
 
     cu_seqlens_q: torch.Tensor
     seqused_k: torch.Tensor
     block_table: torch.Tensor
     max_seqlen_q: int
     max_seqlen_k: int
+    fa_version: int = 2
 
 
 @dataclass
@@ -220,16 +222,27 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             dtype=torch.float32,
             device=device,
         )
-        # FA2 is the newest FlashAttention on Ampere and Ada; newer GPUs are
-        # left on the Triton kernel until the fast path is measured there.
-        self.fa2_prefix_lm = (
+        # PrefixLM prefill on FlashAttention: FA2 on Ampere and Ada, FA3 on
+        # Hopper. Other GPUs stay on the Triton kernel (vLLM's FA2 build has no
+        # SM 12.x code; Blackwell serves PrefixLM natively through FlashInfer).
+        # VLLM_PREFIX_LM_FA=0 turns the fast path off.
+        self.prefix_lm_fa_version: int | None = None
+        if (
             current_platform.is_cuda()
-            and current_platform.is_device_capability_family(80)
-            and is_fa_version_supported(2)
+            and os.environ.get("VLLM_PREFIX_LM_FA", "1") != "0"
             and getattr(kv_cache_spec, "sliding_window", None) is None
             and kv_cache_spec.kv_quant_mode == KVQuantMode.NONE
             and kv_cache_spec.head_size <= 256
-        )
+        ):
+            if current_platform.is_device_capability_family(
+                80
+            ) and is_fa_version_supported(2):
+                self.prefix_lm_fa_version = 2
+            elif current_platform.is_device_capability_family(
+                90
+            ) and is_fa_version_supported(3):
+                self.prefix_lm_fa_version = 3
+        self.fa2_prefix_lm = self.prefix_lm_fa_version is not None
         self.rswa_window = model_config.rswa_window
         # R-SWA restages prefix lengths in build(), which the no-op
         # update_draft_decode_metadata() does not refresh.
@@ -370,6 +383,7 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             ),
             max_seqlen_q=max(b - a for a, b in zip(cu_seqlens_q, cu_seqlens_q[1:])),
             max_seqlen_k=max(seqused_k),
+            fa_version=self.prefix_lm_fa_version or 2,
         )
 
     def update_draft_decode_metadata(self, _metadata: TritonAttentionMetadata) -> None:
@@ -793,7 +807,7 @@ class TritonAttentionImpl(AttentionImpl):
                 softmax_scale=self.scale,
                 causal=False,
                 block_table=fa2.block_table,
-                fa_version=2,
+                fa_version=fa2.fa_version,
             )
             return output
 
