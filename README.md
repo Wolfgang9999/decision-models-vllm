@@ -101,7 +101,7 @@ print(r.json()["answers"])
 
 | GPU | Prefix cache (one state prefill shared by all its questions) | PrefixLM attention picked by default | Status |
 |---|---|---|---|
-| A100, A30 (SM 8.0) | Triton GDN checkpoints (#65186) | Triton, prefill on FlashAttention-2 (#65222) | measured; see known issue |
+| A100, A30 (SM 8.0) | Triton GDN checkpoints (#65186) | Triton, prefill on FlashAttention-2 (#65222) | measured |
 | A10, A40, L4, L40S, RTX 30/40 (SM 8.6/8.9) | same | same | expected, not measured |
 | H100, H200 (SM 9.0) | FlashInfer GDN prefill (in vLLM) | Triton, prefill on FlashAttention-3 (this repo) | measured |
 | B200, GB200 (SM 10.x) | FlashInfer GDN prefill (in vLLM) | FlashAttention-4, native mask | measured |
@@ -217,12 +217,8 @@ FlashInfer everywhere); the image now picks FA3 on H100 and FA4 on B200, the fas
 | joey-1, RTX PRO 6000, bare `vllm serve MODEL --served-model-name joey-1` | 4,554 | 0.44% | 0.0023 |
 | elephant-1, A100, this repo | 704 | 0.7-0.9% | 0.0043 |
 
-### Known issue and open measurements
+### Open measurements
 
-- **A100 (SM 8.x): the current build's engine can crash under concurrent load.** On current vLLM main, builds with
-  #65186's Triton checkpoints lost their engine process (no Python error) at 4,000-token states with 8 concurrent
-  requests and at 2,000 tokens with 64; the earlier image the A100 tables were measured on did not. Being
-  investigated; until it is fixed, test under your load before relying on SM 8.x.
 - elephant-1 on the current build; the bare command with the new per-GPU defaults on H100 and B200 (the FA3 and
   FA4 paths themselves were measured with explicit flags).
 
