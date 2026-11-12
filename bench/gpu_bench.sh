@@ -26,6 +26,7 @@ done
 nvidia-smi --query-gpu=name,compute_cap,driver_version,memory.total --format=csv,noheader | tee $OUT/gpu.txt
 python3 -c "import vllm, torch; print('vllm', vllm.__version__, 'torch', torch.__version__)" | tee -a $OUT/gpu.txt
 export HF_HOME=${HF_HOME:-/tmp/hf}
+export PYTHONFAULTHANDLER=1  # a native crash in the engine then leaves a stack in serve_<arm>.log
 COMMON="--served-model-name $NAME --host 127.0.0.1 --port $PORT --max-num-batched-tokens 65536 --max-num-seqs 64 --gpu-memory-utilization 0.85"
 for ARM in $ARMS; do
   case $ARM in

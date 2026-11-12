@@ -36,15 +36,15 @@ def run(model, arms, branch, grid):
 
 
 TAG = os.environ.get("BENCH_IMAGE_TAG", "latest")
-FN = {gpu: app.function(image=image(TAG), gpu=gpu, timeout=4 * 3600, serialized=True, name=f"bench_{gpu.lower()}")(run)
-      for gpu in ("H100", "B200")}
+FN = {gpu: app.function(image=image(TAG), gpu=gpu, timeout=4 * 3600, serialized=True, name=f"bench_{gpu.lower().replace('-', '_')}")(run)
+      for gpu in ("A100-80GB", "H100", "B200")}
 
 
 @app.local_entrypoint()
 def main(gpu: str = "H100", arms: str = "T FI F4 BARE", model: str = "baselabs/joey-1", branch: str = "main",
          grid: str = ""):
     data = FN[gpu].remote(model, arms, branch, grid)
-    out = Path(__file__).parent / "results" / f"{gpu.lower()}-{model.split('/')[-1]}"
+    out = Path(__file__).parent / "results" / f"{gpu.lower()}-{model.split('/')[-1]}-{arms.replace(' ', '')}"
     out.mkdir(parents=True, exist_ok=True)
     tarfile.open(fileobj=io.BytesIO(data), mode="r:gz").extractall(out, filter="data")
     print(f"results in {out}")
