@@ -1,6 +1,7 @@
 {
   "vllm_commit": "be47189f37f6162991366ff6b91539f6e9d1f432",
   "base_sha256": {
+    "vllm/config/model.py": "11f48787bcb689a916ae5148ebb9710e3becd782bbd509c06349357bc61c00fd",
     "vllm/entrypoints/openai/decisions/question_types.py": "29fe2690afc8498c807a53699e0a660b31c062cb5f00c1085e68b22351f02417",
     "vllm/entrypoints/openai/decisions/slot_prompt.py": null,
     "vllm/entrypoints/openai/decisions/state.py": "0bedf03db4c424b7d3c9a2a19c8bd58aa563dc8281edd8ee3375b7ad36a2dea0",

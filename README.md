@@ -48,8 +48,8 @@ docker run --gpus '"device=0"' --ipc=host -p 8000:8000 \
   ghcr.io/wolfgang9999/decision-models-vllm baselabs/elephant-1 --served-model-name elephant-1
 ```
 
-No tuning flags should be needed (an end-to-end check of the bare command is in progress): for these models the image
-defaults to BF16, a 16,384-token context, prefix caching, the
+No tuning flags are needed: for these models the image defaults to text-only serving (pass `--limit-mm-per-prompt`
+to accept images), BF16, a 16,384-token context, prefix caching, the
 PrefixLM scheduler, prefill steps of at least 32,768 tokens and the attention backend for your GPU. Any `vllm serve`
 option still overrides them (for example `--revision <commit>`, `--gpu-memory-utilization 0.6`,
 `--max-num-batched-tokens 65536`, `--attention-backend TRITON_ATTN`).
@@ -179,6 +179,9 @@ Same workload as the A100 tables (peak decisions/s, concurrency in brackets). "T
 Kernel level (one 2,048-token state + question, head size 256): FlashInfer 0.46 ms vs Triton 0.84 ms per state
 prefill, outputs equal within 2e-2.
 
+The bare command (`vllm serve MODEL --served-model-name joey-1`, nothing else) matched the tuned flags here at 4
+concurrent requests: 49.5 vs 49.2 decisions/s at 13,200 tokens, 104.4 vs 104.4 at 4,000.
+
 ### joey-1 on H100 80GB and B200 (Modal)
 
 Public inputs built from [BEV Decision Mix](https://huggingface.co/datasets/avbiswas/bev-decision) (test split; 64
@@ -211,6 +214,7 @@ FlashInfer everywhere); the image now picks FA3 on H100 and FA4 on B200, the fas
 | joey-1, A100, this repo | 46,522 | 0.51% | 0.0024 |
 | joey-1, RTX PRO 6000, Triton | 72,128 | 0.43% | 0.0023 |
 | joey-1, RTX PRO 6000, this repo (FlashInfer) | 78,057 | 0.47% | 0.0023 |
+| joey-1, RTX PRO 6000, bare `vllm serve MODEL --served-model-name joey-1` | 4,554 | 0.44% | 0.0023 |
 | elephant-1, A100, this repo | 704 | 0.7-0.9% | 0.0043 |
 
 ### Known issue and open measurements
@@ -219,8 +223,8 @@ FlashInfer everywhere); the image now picks FA3 on H100 and FA4 on B200, the fas
   #65186's Triton checkpoints lost their engine process (no Python error) at 4,000-token states with 8 concurrent
   requests and at 2,000 tokens with 64; the earlier image the A100 tables were measured on did not. Being
   investigated; until it is fixed, test under your load before relying on SM 8.x.
-- elephant-1 on the current build; a bare `vllm serve` correctness check on the RTX PRO 6000; the bare command with
-  the new per-GPU defaults on H100 and B200.
+- elephant-1 on the current build; the bare command with the new per-GPU defaults on H100 and B200 (the FA3 and
+  FA4 paths themselves were measured with explicit flags).
 
 ## How it works
 
