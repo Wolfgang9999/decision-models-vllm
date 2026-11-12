@@ -245,16 +245,23 @@ returns a calibrated probability for every answer option. Nothing is generated, 
 |---|---|---|
 | [vllm#63114](https://github.com/vllm-project/vllm/pull/63114) | model, PrefixLM scheduler, `/v1/systemone` | open |
 | [vllm#65186](https://github.com/vllm-project/vllm/pull/65186) | Triton GDN prefill checkpoints (prefix cache on SM 8.x) | open |
-| [vllm#65222](https://github.com/vllm-project/vllm/pull/65222) | FlashAttention-2 PrefixLM prefill on SM 8.x | open |
+| [vllm#65222](https://github.com/vllm-project/vllm/pull/65222) | PrefixLM prefill on FlashAttention-2 (SM 8.x) and FlashAttention-3 (SM 9.x) inside the Triton backend | open |
 | [vllm#46558](https://github.com/vllm-project/vllm/pull/46558) | FlashInfer native mm-prefix attention | merged |
 
-On top of those, the overlay carries what it takes to combine them on current vLLM main:
+`overlay/vllm/v1/attention/backends/triton_attn.py` is #65222's file as submitted. The rest of the overlay is #63114
+and #65186 plus the changes it takes to combine them on current vLLM main and serve every GPU well. Those changes edit
+#63114's code, so they are proposed there rather than in a separate PR
+([comment on #63114](https://github.com/vllm-project/vllm/pull/63114#issuecomment-6825498326)):
 
 - #63114 still checks `use_v2_model_runner`, which main removed with Model Runner V1 (#63373); the check is dropped.
 - #63114 keeps prefix caching when the Triton GDN backend exports checkpoints (#65186).
-- #63114 accepts FlashInfer (and FlashAttention with FA4), flags the model as a PrefixLM so they apply its mask, and
-  picks the backend per GPU; vLLM's rule that forces unchunked multimodal input for such models is skipped for this
-  text-only model, whose hybrid prefix cache needs chunked scheduling.
+- #63114 accepts FlashInfer and FlashAttention (FA4) besides Triton, flags the model as a PrefixLM so they apply its
+  mask, and picks the backend per GPU (Triton on SM 8.x/9.x, FA4 on SM 10.x, FlashInfer on SM 11.x/12.x).
+- vLLM's rule that forces unchunked multimodal input for PrefixLM models is skipped for this text-only model, whose
+  hybrid prefix cache needs chunked scheduling.
+- The model is served text-only unless `--limit-mm-per-prompt` is given, so a plain `vllm serve` does not load or
+  profile the vision tower.
+- The prefill step budget defaults to at least 32,768 tokens.
 
 `overlay/manifest.json` lists every file and the SHA256 of the pinned vLLM file it replaces; `install_overlay.py`
 refuses to apply on any other build.
