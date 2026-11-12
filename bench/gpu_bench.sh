@@ -19,9 +19,12 @@ REPO=${REPO:-https://raw.githubusercontent.com/Wolfgang9999/decision-models-vllm
 GRID=${GRID:-"--buckets 500 4000 ref --qs 11 44 --levels 1 4 8 16 32"}
 mkdir -p $OUT /tmp/bench && cd /tmp/bench
 log(){ echo "[$(date -u +%FT%TZ)] $*" | tee -a $OUT/driver.log; }
-for f in grid_bench.py analyze.py inputs/states.jsonl inputs/payloads.jsonl; do
+# INPUTS_DIR (states.jsonl + payloads.jsonl) overrides the repo's inputs, e.g. private data passed in by modal_bench.py.
+FILES="grid_bench.py analyze.py"; [ -z "${INPUTS_DIR:-}" ] && FILES="$FILES inputs/states.jsonl inputs/payloads.jsonl"
+for f in $FILES; do
   mkdir -p $(dirname $f); curl -fsSL $REPO/bench/$f -o $f || { log "cannot fetch $f"; exit 1; }
 done
+INPUTS=${INPUTS_DIR:-inputs}
 [ "${RESULTS_PORT:-0}" != 0 ] && (cd $OUT && nohup python3 -m http.server $RESULTS_PORT > /dev/null 2>&1 &)
 nvidia-smi --query-gpu=name,compute_cap,driver_version,memory.total --format=csv,noheader | tee $OUT/gpu.txt
 python3 -c "import vllm, torch; print('vllm', vllm.__version__, 'torch', torch.__version__)" | tee -a $OUT/gpu.txt
@@ -46,7 +49,7 @@ for ARM in $ARMS; do
   fi
   grep -hE "using .* attention for the PrefixLM|Using FlashInfer GDN|Using .*backend|prefix caching" $OUT/serve_$ARM.log | head -5 >> $OUT/driver.log
   log "arm $ARM: healthy"
-  BENCH_STATES=inputs/states.jsonl BENCH_PAYLOADS=inputs/payloads.jsonl BENCH_MODEL=$NAME \
+  BENCH_STATES=$INPUTS/states.jsonl BENCH_PAYLOADS=$INPUTS/payloads.jsonl BENCH_MODEL=$NAME \
     python3 grid_bench.py http://127.0.0.1:$PORT $OUT $ARM $GRID 2>&1 | tail -n +1 >> $OUT/driver.log
   log "arm $ARM: done"
   kill $SRV; for t in $(seq 60); do curl -sf http://127.0.0.1:$PORT/health > /dev/null || break; sleep 2; done; sleep 10
