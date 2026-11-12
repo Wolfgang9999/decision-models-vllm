@@ -5,7 +5,7 @@
 #   MODEL=baselabs/joey-1 ARMS="T T3 FI F4 BARE" bash runpod_bench.sh
 #
 # Arms (every arm answers byte-identical requests, so answers can be compared with arm T):
-#   T     TRITON_ATTN, FlashAttention fast path off: the reference. Only images up to vllm-be47189f3-de41652 honour
+#   T     TRITON_ATTN, FlashAttention fast path off: the reference. Only images up to vllm-be47189f3-f25b939 (and :hopper-fa3) honour
 #         VLLM_PREFIX_LM_FA=0; later images ship #65222's file as submitted (no switch), so on SM 8.x/9.x T equals T3.
 #   T3    TRITON_ATTN with the FlashAttention prefill path (FA3 on Hopper, FA2 on Ampere/Ada)
 #   FI    FLASHINFER, native PrefixLM mask (#46558)
