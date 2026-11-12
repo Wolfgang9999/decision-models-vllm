@@ -5,8 +5,8 @@ with plain `vllm serve` on any recent NVIDIA GPU. The image is `vllm/vllm-openai
 requests these models need, and it picks the fastest attention path for the GPU it runs on.
 
 ```bash
-docker run --gpus all --ipc=host -p 8000:8000 ghcr.io/wolfgang9999/decision-models-vllm \
-  baselabs/joey-1 --served-model-name joey-1
+# image: ghcr.io/wolfgang9999/decision-models-vllm  (vLLM nightly + the pending PRs, drop-in for vllm/vllm-openai)
+vllm serve baselabs/joey-1 --served-model-name joey-1
 ```
 
 The entrypoint is the same `vllm serve` as `vllm/vllm-openai`, so the image drops into any setup built for it,
