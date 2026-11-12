@@ -2,7 +2,7 @@ name: image
 on:
   push:
     branches: [main, release-v2]
-    paths: [Dockerfile, overlay/**, install_overlay.py, decision-serve, .github/workflows/image.yml]
+    paths: [Dockerfile, overlay/**, install_overlay.py, .github/workflows/image.yml]
   workflow_dispatch:
 permissions:
   contents: read
@@ -28,4 +28,5 @@ jobs:
           PIN=$(python3 -c "import json; print(json.load(open('overlay/manifest.json'))['vllm_commit'])")
           docker build -t $IMAGE:latest -t $IMAGE:vllm-${PIN:0:9}-${GITHUB_SHA::7} .
           docker run --rm --entrypoint python3 $IMAGE:latest -c "import vllm.model_executor.models.qwen3_5_slot, vllm.v1.core.sched.prefix_lm_scheduler; print('overlay import ok')"
+          docker inspect --format 'entrypoint={{json .Config.Entrypoint}}' $IMAGE:latest
           docker push --all-tags $IMAGE

@@ -1,33 +1,53 @@
 # Base Labs decision models on vLLM
 
-One command to serve [joey-1](https://huggingface.co/baselabs/joey-1) and
-[elephant-1](https://huggingface.co/baselabs/elephant-1) with vLLM on any recent NVIDIA GPU, with the fastest
-attention path for that GPU picked automatically.
+Serve [joey-1](https://huggingface.co/baselabs/joey-1) and [elephant-1](https://huggingface.co/baselabs/elephant-1)
+with plain `vllm serve` on any recent NVIDIA GPU. The image is `vllm/vllm-openai` (pinned nightly) plus the open pull
+requests these models need, and it picks the fastest attention path for the GPU it runs on.
 
 ```bash
-docker run --gpus all --ipc=host -p 8000:8000 ghcr.io/wolfgang9999/decision-models-vllm baselabs/joey-1
-python decide.py http://localhost:8000 joey-1
+docker run --gpus all --ipc=host -p 8000:8000 ghcr.io/wolfgang9999/decision-models-vllm \
+  baselabs/joey-1 --served-model-name joey-1
 ```
 
-The server speaks the model cards' `POST /v1/systemone` API (the same as OneJev's server), so only the URL changes.
+The entrypoint is the same `vllm serve` as `vllm/vllm-openai`, so the image drops into any setup built for it,
+including Helm charts. The server speaks the model cards' `POST /v1/systemone` API (the same as OneJev's server), so
+only the URL changes for existing clients.
 
 > **Status:** support for these models is not in a vLLM release yet. This repo pins a vLLM nightly and adds the open
-> pull requests listed below as a Python-only overlay. When they are released, plain `vllm serve` will do the same.
+> pull requests listed below as a Python-only overlay. When they are released, upstream `vllm serve` will do the same.
 
 <!-- RESULTS:SUMMARY -->
 
 ## Quick start
 
-### Docker (recommended)
+### Docker
 
 ```bash
 docker run --gpus '"device=0"' --ipc=host -p 8000:8000 \
   -v ~/.cache/huggingface:/root/.cache/huggingface \
-  ghcr.io/wolfgang9999/decision-models-vllm baselabs/elephant-1
+  ghcr.io/wolfgang9999/decision-models-vllm baselabs/elephant-1 --served-model-name elephant-1
 ```
 
-`decision-serve MODEL [vllm serve options]` is the entrypoint; any `vllm serve` option after the model overrides the
-defaults (for example `--revision <commit>`, `--gpu-memory-utilization 0.6`, `--attention-backend TRITON_ATTN`).
+No tuning flags are needed: for these models the image defaults to BF16, a 16,384-token context, prefix caching, the
+PrefixLM scheduler, prefill steps of at least 32,768 tokens and the attention backend for your GPU. Any `vllm serve`
+option still overrides them (for example `--revision <commit>`, `--gpu-memory-utilization 0.6`,
+`--max-num-batched-tokens 65536`, `--attention-backend TRITON_ATTN`).
+
+### Helm and Kubernetes
+
+Use the image wherever a chart runs `vllm/vllm-openai`; the container args are the `vllm serve` arguments:
+
+```yaml
+image:
+  repository: ghcr.io/wolfgang9999/decision-models-vllm
+  tag: latest
+args: ["baselabs/joey-1", "--served-model-name", "joey-1", "--port", "8000"]
+resources:
+  limits:
+    nvidia.com/gpu: 1
+```
+
+Readiness: `GET /health`. Prometheus metrics: `GET /metrics` (including `vllm:prefix_cache_*`).
 
 ### Without Docker
 
@@ -37,7 +57,7 @@ Linux x86_64, Python 3.10-3.13, an NVIDIA driver for CUDA 13 (R580 or newer):
 git clone https://github.com/Wolfgang9999/decision-models-vllm && cd decision-models-vllm
 python -m venv .venv && source .venv/bin/activate
 ./install.sh            # pinned vLLM nightly + the overlay (checked file by file)
-./decision-serve baselabs/joey-1
+vllm serve baselabs/joey-1 --served-model-name joey-1
 ```
 
 ### Request

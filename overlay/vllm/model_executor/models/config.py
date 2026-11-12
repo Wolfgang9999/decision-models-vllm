@@ -1597,16 +1597,19 @@ class Qwen3_5ForSlotDecisionConfig(Qwen3_5ForConditionalGenerationConfig):
         scheduler_config.scheduler_cls = prefix_lm_schedulers[0]
         scheduler_config.long_prefill_token_threshold = 0
         # As EngineArgs does with chunked prefill off, raise the step budget to
-        # --max-model-len so a full prompt fits in one step.
-        if scheduler_config.max_num_batched_tokens < model_config.max_model_len:
+        # --max-model-len so a full prompt fits in one step, and to at least
+        # 32768 tokens: these requests are all prefill, and steps that hold
+        # several prompts measured faster (joey-1 and elephant-1 on A100).
+        budget = max(model_config.max_model_len, 32768)
+        if scheduler_config.max_num_batched_tokens < budget:
             logger.info(
                 "Raising max_num_batched_tokens from %d to %d: %s prefills each "
                 "prompt in one step",
                 scheduler_config.max_num_batched_tokens,
-                model_config.max_model_len,
+                budget,
                 model_config.architecture,
             )
-            scheduler_config.max_num_batched_tokens = model_config.max_model_len
+            scheduler_config.max_num_batched_tokens = budget
         scheduled = scheduler_config.max_num_scheduled_tokens
         if scheduled is not None and scheduled < model_config.max_model_len:
             raise ValueError(
