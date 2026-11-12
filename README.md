@@ -29,8 +29,12 @@ install. Higher is better.
 | elephant-1, A100, 13.2k state, 11 questions | 5.6 | | **7.4** (1.3x) |
 | elephant-1, A100, 13.2k state, 44 questions | 12.6 | | **16.2** (1.3x) |
 | elephant-1, A100, 13.2k state asked in 3 requests | 2.2 | | **6.2** (2.8x) |
+| joey-1, RTX PRO 6000, 4k state, 44 questions | 53.2 | 133.3 (Triton) | **149.5** (2.8x) |
 | joey-1, RTX PRO 6000, 13.2k state, 11 questions, 4 concurrent | 12.1 | 38.4 (Triton) | **49.2** (4.1x) |
+| joey-1, H100, 13.2k state, 11 / 44 questions | | 42.8 / 93.0 (Triton) | **92.5 / 183.6** (Triton + FA3) |
+| joey-1, B200, 13.2k state, 11 / 44 questions | | 82.0 / 165.0 (Triton) | **155.3 / 275.5** (FlashAttention-4) |
 
+H100 and B200 rows use a public dataset and compare against vLLM's Triton path (OneJev was not run there).
 Answers match OneJev to BF16 noise: 0.3-0.9% of decisions change their top option and the mean probability
 difference is 0.0023-0.0044 (two BF16 runs of one server already differ by about 0.003).
 
@@ -95,13 +99,15 @@ print(r.json()["answers"])
 
 ## What you get on each GPU
 
-| GPU | Prefix cache (one state prefill shared by all its questions) | Attention for the PrefixLM mask | Status |
+| GPU | Prefix cache (one state prefill shared by all its questions) | PrefixLM attention picked by default | Status |
 |---|---|---|---|
-| A100, A30 (SM 8.0) | Triton GDN checkpoints (#65186) | Triton, prefill on FlashAttention-2 (#65222) | measured |
+| A100, A30 (SM 8.0) | Triton GDN checkpoints (#65186) | Triton, prefill on FlashAttention-2 (#65222) | measured; see known issue |
 | A10, A40, L4, L40S, RTX 30/40 (SM 8.6/8.9) | same | same | expected, not measured |
-| H100, H200 (SM 9.0) | FlashInfer GDN prefill (in vLLM) | FlashInfer native mask (#46558) | expected, not measured |
-| B200, GB200 (SM 10.x) | FlashInfer GDN prefill (in vLLM) | FlashInfer native mask | expected, not measured |
-| RTX PRO 6000, RTX 5090 (SM 12.x) | FlashInfer GDN prefill (in vLLM) | FlashInfer native mask | measured |
+| H100, H200 (SM 9.0) | FlashInfer GDN prefill (in vLLM) | Triton, prefill on FlashAttention-3 (this repo) | measured |
+| B200, GB200 (SM 10.x) | FlashInfer GDN prefill (in vLLM) | FlashAttention-4, native mask | measured |
+| RTX PRO 6000, RTX 5090 (SM 12.x) | FlashInfer GDN prefill (in vLLM) | FlashInfer, native mask (#46558) | measured |
+
+Each default is the fastest path measured on that GPU (tables below); `--attention-backend` overrides it.
 
 ## Measurements
 
@@ -157,17 +163,45 @@ By state size (this repo, peak decisions/s): 500 tokens 21.6 (11 q) / 22.5 (44 q
 
 ### joey-1 on RTX PRO 6000 Blackwell (SM 12.0)
 
-Identical requests at 4 concurrent, 11 questions (decisions/s, median latency):
+Same workload as the A100 tables (peak decisions/s, concurrency in brackets). "This repo" picks FlashInfer here.
 
-| State tokens | OneJev | Triton attention | FlashInfer (this repo's default) |
-|---|---|---|---|
-| 500 | 103.3 (0.42 s) | 148.7 (0.29 s) | **156.8** (0.28 s) |
-| 2,000 | 65.2 (0.67 s) | 140.3 (0.31 s) | **149.3** (0.29 s) |
-| 4,000 | 41.4 (1.08 s) | 94.4 (0.47 s) | **104.4** (0.42 s) |
-| 13,200 | 12.1 (3.30 s) | 38.4 (1.18 s) | **49.2** (0.90 s) |
+| State tokens | Questions | OneJev | Triton attention | This repo (FlashInfer) |
+|---|---|---|---|---|
+| 500 | 11 | 106.1 (c16) | 158.0 (c32) | **160.6** (c32) |
+| 2,000 | 11 | 64.8 (c64) | 141.4 (c8) | **150.4** (c8) |
+| 2,000 | 44 | 80.3 (c8) | 176.7 (c16) | **186.6** (c8) |
+| 4,000 | 11 | 41.1 (c16) | 93.9 (c4) | **104.6** (c32) |
+| 4,000 | 44 | 53.2 (c4) | 133.3 (c32) | **149.5** (c32) |
+| 13,200 | 11 | 12.1 (c4 only) | 39.3 (c64) | **50.7** (c64) |
+| 13,200 | 44 | | 82.7 (c64) | **106.9** (c16) |
+| 4,000, same state in 3 requests | 4/4/3 | 24.3 (c4) | 87.8 (c64) | **97.8** (c64) |
 
 Kernel level (one 2,048-token state + question, head size 256): FlashInfer 0.46 ms vs Triton 0.84 ms per state
 prefill, outputs equal within 2e-2.
+
+### joey-1 on H100 80GB and B200 (Modal)
+
+Public inputs built from [BEV Decision Mix](https://huggingface.co/datasets/avbiswas/bev-decision) (test split; 64
+cases of concatenated states with 11 of their own questions, `bench/build_bev_inputs.py`), concurrency 4/16/32. Every
+path answers byte-identical requests; agreement is against the Triton path (T).
+
+| GPU | State | Questions | Triton (T) | Triton + FA3 | FlashInfer | FlashAttention-4 | Bare `vllm serve` |
+|---|---|---|---|---|---|---|---|
+| H100 | 4,000 | 11 | 201.2 | **269.4** | 243.5 | 269.1 | 248.1 |
+| H100 | 4,000 | 44 | 331.4 | 421.1 | 398.0 | 408.5 | **444.7** |
+| H100 | 13,200 | 11 | 42.8 | **92.5** | 67.9 | 89.1 | 67.5 |
+| H100 | 13,200 | 44 | 93.0 | **183.6** | 144.4 | 180.3 | 147.5 |
+| H100 | 13,200, 3 requests | 4/4/3 | 38.2 | **67.4** | 51.3 | 63.7 | 54.4 |
+| B200 | 4,000 | 11 | 342.9 | n/a | 392.0 | **450.4** | 411.2 |
+| B200 | 4,000 | 44 | 541.6 | n/a | 575.3 | 619.6 | **726.6** |
+| B200 | 13,200 | 11 | 82.0 | n/a | 97.2 | **155.3** | 97.7 |
+| B200 | 13,200 | 44 | 165.0 | n/a | 202.3 | **275.5** | 216.9 |
+| B200 | 13,200, 3 requests | 4/4/3 | 58.0 | n/a | 70.6 | **84.6** | 69.6 |
+
+Agreement with Triton: 0.30-0.41% of decisions change their top option, mean probability difference 0.0019, for
+every path on both GPUs. The explicit paths ran with `--max-num-seqs 64`; the bare command keeps vLLM's 128, which is
+why it leads at 44 questions (44 sequences per request). The bare runs above predate the per-GPU defaults (they picked
+FlashInfer everywhere); the image now picks FA3 on H100 and FA4 on B200, the fastest paths here.
 
 ### Answer agreement with OneJev
 
@@ -175,15 +209,18 @@ prefill, outputs equal within 2e-2.
 |---|---|---|---|
 | joey-1, A100, vLLM main + #63114 | 24,967 | 0.54% | 0.0023 |
 | joey-1, A100, this repo | 46,522 | 0.51% | 0.0024 |
-| joey-1, RTX PRO 6000, Triton | 4,554 | 0.31% | 0.0023 |
-| joey-1, RTX PRO 6000, FlashInfer | 4,554 | 0.46% | 0.0023 |
+| joey-1, RTX PRO 6000, Triton | 72,128 | 0.43% | 0.0023 |
+| joey-1, RTX PRO 6000, this repo (FlashInfer) | 78,057 | 0.47% | 0.0023 |
 | elephant-1, A100, this repo | 704 | 0.7-0.9% | 0.0043 |
 
-### Still being measured
+### Known issue and open measurements
 
-- The release build on the pinned nightly on A100 (joey-1, elephant-1) and on the RTX PRO 6000 (latency grid), and a
-  check that a bare `vllm serve MODEL` gives the same answers as the tuned flags.
-- No H100 or B200 numbers yet; those rows are expectations.
+- **A100 (SM 8.x): the current build's engine can crash under concurrent load.** On current vLLM main, builds with
+  #65186's Triton checkpoints lost their engine process (no Python error) at 4,000-token states with 8 concurrent
+  requests and at 2,000 tokens with 64; the earlier image the A100 tables were measured on did not. Being
+  investigated; until it is fixed, test under your load before relying on SM 8.x.
+- elephant-1 on the current build; a bare `vllm serve` correctness check on the RTX PRO 6000; the bare command with
+  the new per-GPU defaults on H100 and B200.
 
 ## How it works
 
@@ -197,9 +234,10 @@ returns a calibrated probability for every answer option. Nothing is generated, 
 - **Prefix caching for the hybrid layers.** The models mix full attention with GDN linear-attention layers, whose
   recurrent state must be saved mid-prefill to be reused. vLLM does that with FlashInfer's kernel on SM 9.0+; #65186
   makes the Triton kernel do it, which is what SM 8.x needs.
-- **Attention.** #63114 applies the mask with vLLM's Triton kernel on every GPU. On SM 8.x, #65222 sends those prefills
-  to FlashAttention-2 (one non-causal call per block). From SM 9.0 this repo selects FlashInfer, whose prefill applies
-  the mask natively (#46558); measured 5-28% faster than Triton on an RTX PRO 6000 with the same answers.
+- **Attention.** #63114 applies the mask with vLLM's Triton kernel on every GPU. This repo sends those prefills to
+  FlashAttention-2 on SM 8.x (#65222) and FlashAttention-3 on SM 9.x (one non-causal call per block), uses
+  FlashAttention-4's native mask on SM 10.x and FlashInfer's (#46558) on SM 11.x-12.x. Measured 1.2-2.2x faster than
+  the Triton kernel at long states with the same answers.
 
 ### Pull requests included
 
@@ -227,7 +265,7 @@ refuses to apply on any other build.
 - `confidence` in answers is computed differently from OneJev; the option probabilities agree.
 - Check these models through decisions, not chat: joey-1's chat output is noise in every runtime.
 - Requests are limited to 16,384 tokens, like the model cards.
-- vLLM's FlashAttention-2 build has no SM 12.x code, which is one reason SM 9.0+ uses FlashInfer here.
+- vLLM's FlashAttention-2/-3 builds have no SM 12.x code, so the RTX PRO 6000 class uses FlashInfer.
 
 ## Reproducing the numbers
 

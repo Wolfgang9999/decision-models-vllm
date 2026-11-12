@@ -1,0 +1,27 @@
+{
+  "gpu": "H100",
+  "app_id": "ap-ahPb99rh6KonC3Hyz4U3p1",
+  "model": "baselabs/joey-1",
+  "image_tag": "hopper-fa3",
+  "inputs": "avbiswas/bev-decision test; concatenated states",
+  "windows": 90,
+  "errors": 0,
+  "timeouts": 0,
+  "files": {
+    "serve_T.log": "5713b81e93e723728fdfb54f8473a2de0db293c4b373ec0318d62cd504d16b51",
+    "report.partial.md": "fceb2a4da5b04c0d9e52f7585b656641619bae50b3a96f261af3267a15bdc2d0",
+    "raw_T.jsonl": "e99f397d40d40f9a1bbb830fde862190d5bab42546a994dd0d23c25db77767f7",
+    "serve_BARE.log": "673408bd7fa5b697fe252d9cdbd869a35a0ccaf80830d904029d6792c63924a0",
+    "serve_F4.log": "513b683252fe8a6b662bce07b02c9f7b37cc367f74297927994a8286b4419a34",
+    "report.md": "c74fb5e972fcb799d754ef70dc15d926f135f54b948b1fc06aee076a466668e1",
+    "serve_T3.log": "aaebcc6b1204e521c6a5452f40f7f6b3621a787ad9c71e9f3751e34698f79fd2",
+    "gpu.txt": "27cc5be5c6dd22aa3b92553f57f3dabaeb3731e5dfd24f38c9809c1b80c765c1",
+    "raw_BARE.jsonl": "dbba9c4ca26a9b7dfd78e4e69aaacaefb37228eac36835b4a4dae8d5e1998fc8",
+    "driver.log": "e55dd733e7b6d2a4a1567df3833ae8d2f799aebd48f9c351d8624e97c37fa41a",
+    "raw_T3.jsonl": "cec148b1bd116fd09169a402792eedf0f7a1aaff21ff0471cb396cf1336500a1",
+    "serve_FI.log": "b54cdc9370ddb511f3aca2daedef0bd585c12794ccf89470c22847fdd95fa887",
+    "raw_FI.jsonl": "014870e7866a4c894accd87fc826e0b9e24c065c36a0949efe3e56d4ba7fb749",
+    "raw_F4.jsonl": "0d5b4d0979a36bfcc79638f9bfc167ae2a7fd906146c66f40a82fe25f026d47d",
+    "summary.jsonl": "416396e7e9325caf6bb78038fc6bcf7de5b4b9de1ee35bab86bf9aefc058af10"
+  }
+}

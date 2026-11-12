@@ -1556,20 +1556,24 @@ class Qwen3_5ForSlotDecisionConfig(Qwen3_5ForConditionalGenerationConfig):
                 f"{model_config.architecture} does not support {', '.join(features)}"
             )
 
-        # The PrefixLM ranges are applied by Triton attention (any GPU; on SM 8.x
-        # its prefill runs on FlashAttention-2) or natively by FlashInfer
-        # (#46558), which is faster from SM 9.0 on. A per-kind backend wins over
-        # the global one, as in the selector.
+        # Fastest measured PrefixLM attention per GPU family (joey-1, 2026-11-12):
+        # SM 8.x and 9.x: Triton, whose prefill runs on FlashAttention-2 / -3;
+        # SM 10.x: FlashAttention-4 with its native mask; SM 11.x and 12.x:
+        # FlashInfer with its native mask (#46558; vLLM picks FA4 only on SM 10.x
+        # and its FA2/FA3 builds have no SM 12.x code).
+        # A per-kind backend wins over the global one, as in the selector.
         attention_config = vllm_config.attention_config
         if attention_config.backend is None:
             from vllm.platforms import current_platform
 
             capability = current_platform.get_device_capability()
-            attention_config.backend = (
-                AttentionBackendEnum.FLASHINFER
-                if capability is not None and capability.major >= 9
-                else AttentionBackendEnum.TRITON_ATTN
-            )
+            major = capability.major if capability is not None else 0
+            if major == 10:
+                attention_config.backend = AttentionBackendEnum.FLASH_ATTN
+            elif major >= 11:
+                attention_config.backend = AttentionBackendEnum.FLASHINFER
+            else:
+                attention_config.backend = AttentionBackendEnum.TRITON_ATTN
             logger.info(
                 "%s: using %s attention for the PrefixLM ranges",
                 model_config.architecture,

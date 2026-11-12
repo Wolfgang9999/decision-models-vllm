@@ -1,1 +1,5 @@
+bench/results/
+results/**/raw_*.jsonl
+results/**/serve_*.log
+results/**/report.partial.md
 __pycache__/

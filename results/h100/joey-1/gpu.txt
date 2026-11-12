@@ -1,0 +1,2 @@
+NVIDIA H100 80GB HBM3, 9.0, 610.57.04, 81559 MiB
+vllm 0.34.0rc1.dev302+gbe47189f3 torch 2.14.0+cu130
