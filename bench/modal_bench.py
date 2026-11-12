@@ -21,7 +21,10 @@ app = modal.App("decision-models-vllm-bench")
 
 
 def image(tag):
-    return modal.Image.from_registry(f"ghcr.io/wolfgang9999/decision-models-vllm:{tag}").entrypoint([])
+    # The vLLM image ships python3 only; Modal looks for `python` to detect the version.
+    return (modal.Image.from_registry(f"ghcr.io/wolfgang9999/decision-models-vllm:{tag}")
+            .dockerfile_commands(["RUN ln -sf $(command -v python3) /usr/local/bin/python"])
+            .entrypoint([]))
 
 
 def run(model, arms, branch, grid, inputs=None):
@@ -42,8 +45,20 @@ def run(model, arms, branch, grid, inputs=None):
 
 
 TAG = os.environ.get("BENCH_IMAGE_TAG", "latest")
-FN = {gpu: app.function(image=image(TAG), gpu=gpu, timeout=4 * 3600, serialized=True, name=f"bench_{gpu.lower().replace('-', '_')}")(run)
-      for gpu in ("A100-80GB", "H100", "B200")}
+IMAGE = image(TAG)
+
+
+@app.function(image=IMAGE, gpu="H100", timeout=4 * 3600)
+def bench_h100(model, arms, branch, grid, inputs=None):
+    return run(model, arms, branch, grid, inputs)
+
+
+@app.function(image=IMAGE, gpu="B200", timeout=4 * 3600)
+def bench_b200(model, arms, branch, grid, inputs=None):
+    return run(model, arms, branch, grid, inputs)
+
+
+FN = {"H100": bench_h100, "B200": bench_b200}
 
 
 @app.local_entrypoint()
